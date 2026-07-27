@@ -766,7 +766,18 @@ class LTXLatentAnchorAware:
 
         # ─── Core blend (matching identical to v1.4, energy modulation added) ─
         def _apply_blend(tensor, block_idx, depth_mult):
-            B, seq, D = tensor.shape
+            B, full_seq, D = tensor.shape
+            prefix_seq_len = int(
+                getattr(backbone, "_pending_ref_seq_len", 0) or 0
+            )
+            has_prefix = 0 < prefix_seq_len < full_seq
+            prefix_tensor = (
+                tensor[:, :prefix_seq_len] if has_prefix else None
+            )
+            target_tensor = (
+                tensor[:, prefix_seq_len:] if has_prefix else tensor
+            )
+            B, seq, D = target_tensor.shape
             _, _, F_lat, H_lat, W_lat = state["latent_shape"]
             F_tok = max(1, F_lat // TEMPORAL_PATCH)
             H_tok = max(1, H_lat // SPATIAL_PATCH)
@@ -799,7 +810,7 @@ class LTXLatentAnchorAware:
                       f"K={K} (whole anchor frame)")
                 state["hook_logged"] = True
 
-            grid = _to_grid(tensor, B, F_tok, H_tok, W_tok, D)
+            grid = _to_grid(target_tensor, B, F_tok, H_tok, W_tok, D)
 
             # Per-frame strength schedule
             if F_tok > 1 and decay_with_distance > 0.0:
@@ -963,7 +974,13 @@ class LTXLatentAnchorAware:
                           f"{type(_e).__name__}: {_e}")
             state["calls"] += 1
 
-            return _from_grid(grid_modified, B, F_tok, H_tok, W_tok, D, seq)
+            new_target_tensor = _from_grid(
+                grid_modified, B, F_tok, H_tok, W_tok, D, seq
+            )
+            return (
+                torch.cat([prefix_tensor, new_target_tensor], dim=1)
+                if has_prefix else new_target_tensor
+            )
 
         def make_attn1_hook(block_idx):
             depth_mult = _depth_multiplier(depth_curve, block_idx, n_blocks)

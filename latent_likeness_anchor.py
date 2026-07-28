@@ -146,6 +146,7 @@ METADATA_KEY = "_10s_likeness_reference"
 # Sentinels for hook coexistence with other 10S nodes
 HOOK_ATTR_ATTN1 = "_10s_likeness_anchor_attn1_hook"
 HOOK_ATTR_BACKBONE = "_10s_likeness_anchor_backbone_hook"
+HOOK_ATTR_BACKBONE_HANDLE = "_10s_likeness_anchor_backbone_handle"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -488,8 +489,20 @@ class LTXLikenessAnchor:
                             n_removed += 1
                         except AttributeError:
                             pass
-                # Also clear backbone pre-hook sentinel so a future apply can
-                # cleanly re-register
+                # Also detach the backbone pre-hook and clear its sentinel so a
+                # future apply can cleanly re-register. Dropping the sentinel
+                # alone would leave the hook itself attached and firing.
+                prior_bb = getattr(backbone, HOOK_ATTR_BACKBONE_HANDLE, None)
+                if prior_bb is not None:
+                    try:
+                        prior_bb.remove()
+                        n_removed += 1
+                    except Exception:
+                        pass
+                    try:
+                        delattr(backbone, HOOK_ATTR_BACKBONE_HANDLE)
+                    except AttributeError:
+                        pass
                 if getattr(backbone, HOOK_ATTR_BACKBONE, False):
                     try:
                         delattr(backbone, HOOK_ATTR_BACKBONE)
@@ -621,9 +634,29 @@ class LTXLikenessAnchor:
                         print(f"→ [10S] LikenessAnchor: ⚠ latent "
                               f"extraction raised {type(e).__name__}: {e}")
 
-        if not getattr(backbone, HOOK_ATTR_BACKBONE, False):
-            backbone.register_forward_pre_hook(backbone_pre_hook, with_kwargs=True)
-            setattr(backbone, HOOK_ATTR_BACKBONE, True)
+        # Always re-register the backbone pre-hook, removing any prior one.
+        # The sentinel lives on the backbone module, which model.clone() shares
+        # by reference, so gating registration on it meant that from the second
+        # apply onward in a single ComfyUI process the FIRST apply's closure
+        # stayed attached — writing into a dead state dict, leaving this run's
+        # captured_latent_shape (and current_sigma) permanently None, and
+        # silently disabling latent_frame_0 plus the skip_when_sigma_above gate
+        # in every mode.
+        prior_bb = getattr(backbone, HOOK_ATTR_BACKBONE_HANDLE, None)
+        if prior_bb is not None:
+            try:
+                prior_bb.remove()
+            except Exception:
+                pass
+            try:
+                delattr(backbone, HOOK_ATTR_BACKBONE_HANDLE)
+            except AttributeError:
+                pass
+        bb_handle = backbone.register_forward_pre_hook(
+            backbone_pre_hook, with_kwargs=True
+        )
+        setattr(backbone, HOOK_ATTR_BACKBONE_HANDLE, bb_handle)
+        setattr(backbone, HOOK_ATTR_BACKBONE, True)
 
         # ─── attn1 hook factory ──────────────────────────────────────────────
         def make_attn1_hook(block_idx):

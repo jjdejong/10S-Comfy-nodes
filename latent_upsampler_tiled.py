@@ -102,8 +102,10 @@ class LTXVLatentUpsamplerTiled:
                               max_size_for_no_tile=32,
                               rotate_for_landscape=False,
                               debug=False):
-        device = model_management.get_torch_device()
-        model_dtype = next(upscale_model.parameters()).dtype
+        # LATENT_UPSCALE_MODEL is a ModelPatcher in current ComfyUI.
+        device = upscale_model.load_device
+        model = upscale_model.model
+        model_dtype = upscale_model.model_dtype()
         latents = samples["samples"]
         input_dtype = latents.dtype
         B, C, F, H, W = latents.shape
@@ -118,16 +120,13 @@ class LTXVLatentUpsamplerTiled:
             overlap = max(1, tile_size - 1)
 
         # Memory estimate — only one tile in memory at a time, plus accumulators
-        memory_required = model_management.module_size(upscale_model)
         tile_volume = B * C * F * (tile_size * 2) ** 2
         output_volume = B * C * F * (H * 2) * (W * 2)
-        memory_required += tile_volume * 3000.0
+        memory_required = tile_volume * 3000.0
         memory_required += output_volume * 4.0  # fp32 accumulator
-        model_management.free_memory(memory_required, device)
+        model_management.load_models_gpu([upscale_model], memory_required=memory_required)
 
         try:
-            upscale_model.to(device)
-
             # Un-normalize ONCE on full latent (global per-channel statistics)
             latents_dev = latents.to(dtype=model_dtype, device=device)
             latents_un = vae.first_stage_model.per_channel_statistics.un_normalize(latents_dev)
@@ -155,13 +154,13 @@ class LTXVLatentUpsamplerTiled:
                 if debug:
                     print(f"  \u00b7 H={H} W={W} both \u2264 max_size_for_no_tile="
                           f"{max_size_for_no_tile}; using non-tiled path")
-                upsampled = upscale_model(latents_un)
+                upsampled = model(latents_un)
             else:
                 if debug:
                     print(f"  \u00b7 tiling triggered: H={H} > {max_size_for_no_tile} "
                           f"or W={W} > {max_size_for_no_tile}")
                 upsampled = self._upsample_tiled(
-                    latents_un, upscale_model, tile_size, overlap, debug
+                    latents_un, model, tile_size, overlap, debug
                 )
 
             # Rotate back if we rotated
@@ -173,7 +172,7 @@ class LTXVLatentUpsamplerTiled:
             # Re-normalize ONCE on full output
             upsampled = vae.first_stage_model.per_channel_statistics.normalize(upsampled)
         finally:
-            upscale_model.cpu()
+            model_management.unload_model_and_clones(upscale_model)
 
         upsampled = upsampled.to(
             dtype=input_dtype,

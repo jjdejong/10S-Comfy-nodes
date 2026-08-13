@@ -62,7 +62,6 @@ import math
 import torch
 from comfy import model_management
 
-
 class LTXVLatentUpsamplerTiled:
     """
     Spatially-tiled drop-in replacement for LTXVLatentUpsampler.
